@@ -44,7 +44,7 @@ async def main():
     dp = Dispatcher(storage = MemoryStorage())
 
     scheduler = AsyncIOScheduler(timezone = 'Europe/Moscow')
-    scheduler.add_job(parse_all_groups, trigger = 'cron', hour = 11, minute = 10)
+    scheduler.add_job(parse_all_groups, trigger = 'cron', hour = 9, minute = 3)
     scheduler.start()
 
     # Регистрируем роутеры

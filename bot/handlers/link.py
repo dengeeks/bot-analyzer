@@ -1,5 +1,7 @@
+import asyncio
 import io
 import logging
+from typing import Dict
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
@@ -10,10 +12,12 @@ from bot.filters.admin import AdminFilter
 from bot.fsm.link import TableStates
 from bot.keyboards.group import group_detail_keyboard
 from bot.keyboards.link import confirm_delete_group_links_keyboard
-from bot.services.group import GroupService, GroupHandler
+from bot.services.file_handlers import FileProcessor
+from bot.services.group import GroupService
 from bot.services.link import LinkService, TableHandler
 from bot.tasks.parse import parse_single_group
 from bot.utils.callback import parse_callback
+from bot.utils.group import _get_group_info_text
 from bot.utils.link import _process_links, generate_price_diff_excel
 from core.config import load_config
 
@@ -24,514 +28,332 @@ admin_ids = config.tg_bot.admin_ids
 
 router = Router()
 router.message.filter(AdminFilter(admin_ids))
+running_tasks: Dict[int, asyncio.Task] = {}
+
+
+async def _update_parser_status_and_respond(
+        callback: CallbackQuery,
+        group_id: int,
+        site_id: int,
+        is_active: bool,
+        success_message: str
+) -> None:
+    """Общая функция для обновления статуса парсера и ответа"""
+    await GroupService.update_parser_status(group_id, is_active = is_active)
+    group = await GroupService.get_group(group_id)
+    group_info_text = await _get_group_info_text(group_id)
+
+    await callback.answer(success_message)
+    await callback.message.edit_text(
+        text = group_info_text,
+        reply_markup = group_detail_keyboard(
+            group_id = group_id,
+            site_id = site_id,
+            is_parser_active = group.is_active
+        )
+    )
+
+
+def _prepare_links_data(links, is_final: bool = False) -> list:
+    """Подготавливает данные ссылок для Excel"""
+    if is_final:
+        return [{
+            "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A",
+            "Название товара": link.productName or "N/A",
+            "Название компании": link.companyName or "N/A",
+            "Стоимость": link.last_price or "N/A",
+            "Ссылка": link.url
+        } for link in links]
+    else:
+        return [{
+            "Название компании": link.companyName,
+            "Название продукта": link.productName,
+            "Ссылка на товар": link.url
+        } for link in links]
 
 
 @router.callback_query(F.data.startswith("add_table_"))
 async def add_table_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик начала загрузки таблицы"""
-    _, _, group_id, site_id = callback.data.split("_")
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    # состояние добавления таблицы
-    await state.update_data(group_id = int(group_id), site_id = int(site_id))
-    await state.set_state(TableStates.uploading_table)
+        await state.update_data(group_id = int(group_id), site_id = int(site_id))
+        await state.set_state(TableStates.uploading_table)
 
-    text = (
-        "📁 Пожалуйста, отправьте файл таблицы в формате `.xlsx` или `.csv`.\n\n"
-        "⚠️ Обязательно должна быть колонка с названием <b>`Ссылка на товар`</b>.\n"
-        "⚠️ Все ссылки должны начинаться с <b>`https://satu.kz/`</b>, иначе они не будут приняты и не загрузятся в парсер.\n"
-        "ℹ️ Остальные колонки не обязательны — бот обработает только ссылки.\n\n"
-        "Пример допустимого файла:\n"
-        "Название | Ссылка на товар\n"
-        "Товар 1  | https://satu.kz/...\n"
-        "Товар 2  | https://satu.kz/..."
-    )
-    await callback.message.answer(text)
-    await callback.answer()
+        instruction_text = (
+            "📁 Пожалуйста, отправьте файл таблицы в формате `.xlsx` или `.csv`.\n\n"
+            "⚠️ Обязательно должна быть колонка с названием <b>`Ссылка на товар`</b>.\n"
+            "⚠️ Все ссылки должны начинаться с <b>`https://satu.kz/`</b>.\n"
+            "ℹ️ Остальные колонки не обязательны — бот обработает только ссылки.\n\n"
+            "Пример допустимого файла:\n"
+            "Название | Ссылка на товар\n"
+            "Товар 1  | https://satu.kz/...\n"
+            "Товар 2  | https://satu.kz/..."
+        )
+
+        await callback.message.answer(instruction_text)
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Ошибка в add_table_start: {e}")
+        await callback.message.answer("❌ Произошла ошибка при обработке запроса")
+        await callback.answer("Ошибка обработки запроса")
 
 
 @router.message(TableStates.uploading_table, F.document)
 async def upload_table(message: Message, state: FSMContext):
     """Обработка загруженной таблицы"""
-    data = await state.get_data()
-    group_id = data["group_id"]
-    site_id = data["site_id"]
-
-    # получение группы
-    group = await GroupService.get_group(int(group_id))
-
     try:
-        # обработка таблицы
+        data = await state.get_data()
+        group_id = data["group_id"]
+        site_id = data["site_id"]
+
+        # Скачивание файла
         file_bytes = io.BytesIO()
         await message.bot.download(message.document.file_id, destination = file_bytes)
-        file_bytes.seek(0)
 
-        df = await TableHandler.validate_and_read_file(
-            file_bytes,
-            message.document.file_name
-        )
+        # Валидация и чтение файла
+        df = await FileProcessor.process_file(file_bytes, message.document.file_name)
 
-        if "Ссылка на товар" not in df.columns:
-            raise ValueError("В таблице нет обязательной колонки 'Ссылка на товар'")
-
+        # Обработка ссылок
         created_count = await _process_links(df["Ссылка на товар"], group_id)
 
-        parser_text = (
-            "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-            if group.is_active else
-            "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-        )
+        # Генерация ответа
+        group_info_text = await _get_group_info_text(group_id)
+        group = await GroupService.get_group(group_id)
 
-        # получение количества ссылок в группе(для анализа)
-        count_links = await LinkService.get_count_product_link_by_group_id(group_id = group_id)
-
-        text = (
-            f"ℹ️ Информация о группе:\n\n"
-            f"Название: {group.title}\n"
-            f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-            f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-            f"Количество ссылок для анализа: {count_links}\n\n"
-
-            "Доступные действия:\n"
-            "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-            "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-            "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-            " ссылки складываются в основную таблицу).\n"
-            "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-            f"{parser_text}"
-            "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-            "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-            "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-        )
-
+        await message.answer(f'✅ Успешно добавлено {created_count} ссылок')
         await message.answer(
-            f'✅ Успешно добавлено {created_count} ссылок',
-        )
-        await message.answer(
-            text,
+            group_info_text,
             reply_markup = group_detail_keyboard(group_id, site_id, group.is_active),
-
         )
 
+    except ValueError as e:
+        logger.warning(f"Ошибка валидации файла: {e}")
+        await message.answer(f"❌ {str(e)}")
     except Exception as e:
-        logger.error(f"Ошибка при обработке таблицы: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Критическая ошибка при обработке таблицы: {e}")
+        await message.answer("❌ Произошла непредвиденная ошибка при обработке файла")
     finally:
         await state.clear()
 
 
 @router.callback_query(F.data.startswith("view_table_"))
-async def view_table(callback: CallbackQuery):
+async def view_table_handler(callback: CallbackQuery):
     """Генерация и отправка таблицы со ссылками"""
-    _, _, group_id, site_id = callback.data.split("_")
-    group_id, site_id = int(group_id), int(site_id)
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    # получение группы
-    group = await GroupService.get_group(group_id)
-    # получение всех ссылок группы
-    links = await ProductLink.filter(group_id = group_id).all()
+        group = await GroupService.get_group(group_id)
+        links = await ProductLink.filter(group_id = group_id).all()
 
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
+        if not links:
+            await callback.answer("ℹ️ В этой группе пока нет ссылок для анализа.")
+            return
 
-    # получение количества ссылок в группе(для анализа)
-    count_links = await LinkService.get_count_product_link_by_group_id(group_id = group_id)
+        # Подготовка данных для Excel
+        links_data = _prepare_links_data(links, is_final = False)
+        excel_file = TableHandler.create_excel_with_autofit(links_data, group)
+        group_info_text = await _get_group_info_text(group_id)
 
-    if not links:
-        await callback.answer(
-            "ℹ️ В этой группе пока нет ссылок для анализа.\n\n"
-            "Вы можете добавить новые ссылки через кнопку «➕ Добавить таблицу» или загрузить файл с товарами."
+        await callback.message.answer_document(excel_file, caption = 'Входная таблица')
+        await callback.message.answer(
+            group_info_text,
+            reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
         )
-        return
+        await callback.answer()
 
-    links_data = [{
-        "Название компании": link.companyName,
-        "Название продукта": link.productName,
-        "Ссылка на товар": link.url
-    } for link in links]
-
-    excel_file = TableHandler.create_excel_with_autofit(links_data, group)
-
-    text_table = 'Входная таблица'
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {count_links}\n\n"
-
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-    await callback.message.answer_document(excel_file, caption = text_table)
-
-    await callback.message.answer(
-        text,
-        reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
-    )
-    await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка в view_table_handler: {e}")
+        await callback.answer("❌ Ошибка при генерации таблицы")
 
 
 @router.callback_query(F.data.startswith("delete_table_"))
 async def delete_links(callback: CallbackQuery):
     """Подтверждение удаления ссылок группы"""
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group_id, site_id = int(group_id), int(site_id)
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    # получение группы
-    group = await GroupService.get_group(group_id)
-    # количество ссылок
-    links_count = await ProductLink.filter(group_id = group_id).count()
+        group = await GroupService.get_group(group_id)
+        links_count = await ProductLink.filter(group_id = group_id).count()
 
-    if not links_count:
-        await callback.answer(
-            "ℹ️ В этой группе пока нет ссылок, которые можно удалить.\n\n"
-            "Сначала добавьте ссылки через кнопку «➕ Добавить таблицу» или загрузите файл с товарами."
+        if not links_count:
+            await callback.answer("ℹ️ В этой группе пока нет ссылок для удаления.")
+            return
+
+        confirmation_text = (
+            f"<b>Информация о группе</b>:\n"
+            f"Название: {group.title}\n"
+            f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
+            f"Активна: {'Да' if group.is_active else 'Нет'}\n\n"
+            f"<b>Информация о таблице</b>: \n"
+            f"Количество ссылок: {links_count} \n\n"
+            f"<b>Вы уверены, что хотите удалить все ссылки этой группы?</b>"
         )
-        return
 
-    text = (
-        f"<b>Информация о группе</b>:\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Активна: {'Да' if group.is_active else 'Нет'}\n\n"
-        f"<b>Информация о таблице</b>: \n"
-        f"Количество ссылок: {links_count} \n\n"
-        f"<b>Вы уверены, что хотите удалить все ссылки этой группы?</b>"
-    )
+        await callback.message.edit_text(
+            confirmation_text,
+            reply_markup = confirm_delete_group_links_keyboard(group_id, site_id)
+        )
 
-    await callback.message.edit_text(
-        text,
-        reply_markup = confirm_delete_group_links_keyboard(group_id, site_id)
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в delete_links: {e}")
+        await callback.answer("❌ Ошибка при обработке запроса")
 
 
 @router.callback_query(F.data.startswith(("links_confirm_", "links_cancel_")))
 async def process_delete_links_confirmation(callback: CallbackQuery):
     """Обработка подтверждения удаления ссылок"""
-    parts = parse_callback(callback.data)
-    group_id, site_id = int(parts[2]), int(parts[3])
-    group = await GroupService.get_group(group_id)
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
+        group = await GroupService.get_group(group_id)
 
-    if callback.data.startswith("links_confirm_"):
-        deleted_count = await LinkService.delete_links_by_group(group_id)
-        await callback.answer(f"✅ Все ссылки ({deleted_count}) удалены!")
-    else:
-        await callback.answer("❌ Удаление отменено.")
+        if callback.data.startswith("links_confirm_"):
+            deleted_count = await LinkService.delete_links_by_group(group_id)
+            await callback.answer(f"✅ Удалено {deleted_count} ссылок!")
+        else:
+            await callback.answer("❌ Удаление отменено.")
 
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
+        group_info_text = await _get_group_info_text(group_id)
 
-    # получение количества ссылок в группе(для анализа)
-    count_links = await LinkService.get_count_product_link_by_group_id(group_id = group_id)
+        await callback.message.edit_text(
+            group_info_text,
+            reply_markup = group_detail_keyboard(group_id, site_id, group.is_active)
+        )
 
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {count_links}\n\n"
-
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup = group_detail_keyboard(group_id, site_id, group.is_active)
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в process_delete_links_confirmation: {e}")
+        await callback.answer("❌ Ошибка при обработке подтверждения")
 
 
 @router.callback_query(F.data.startswith("start_parser_"))
 async def start_parser_handler(callback: CallbackQuery):
     """Обработчик запуска парсера для группы"""
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group_id = int(group_id)
-
-    # Обновляем статус парсера в базе данных
-    group = await GroupService.update_parser_status(group_id, is_active = True)
-
-    group = await GroupService.get_group(group_id)
-
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
-
-    # получение количества ссылок в группе(для анализа)
-    count_links = await LinkService.get_count_product_link_by_group_id(group_id = group_id)
-
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {count_links}\n\n"
-
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-
-    # Отправляем подтверждение и обновляем клавиатуру
-    await callback.answer("✅ Парсер успешно запущен!")
-    await callback.message.edit_text(
-        text = text,
-        reply_markup = group_detail_keyboard(
-            group_id = group_id,
-            site_id = int(site_id),
-            is_parser_active = group.is_active
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
+        await _update_parser_status_and_respond(
+            callback, group_id, site_id, True, "✅ Парсер успешно запущен!"
         )
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в start_parser_handler: {e}")
+        await callback.answer("❌ Ошибка при запуске парсера")
 
 
 @router.callback_query(F.data.startswith("stop_parser_"))
 async def stop_parser_handler(callback: CallbackQuery):
     """Обработчик остановки парсера для группы"""
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group_id = int(group_id)
-
-    # Обновляем статус парсера в базе данных
-    group = await GroupService.update_parser_status(group_id, is_active = False)
-
-    group = await GroupService.get_group(group_id)
-
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
-
-    # получение количества ссылок в группе(для анализа)
-    count_links = await LinkService.get_count_product_link_by_group_id(group_id = group_id)
-
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {count_links}\n\n"
-
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-
-    # Отправляем подтверждение и обновляем клавиатуру
-    await callback.answer("✅ Парсер успешно запущен!")
-    await callback.message.edit_text(
-        text = text,
-        reply_markup = group_detail_keyboard(
-            group_id = group_id,
-            site_id = int(site_id),
-            is_parser_active = group.is_active
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
+        await _update_parser_status_and_respond(
+            callback, group_id, site_id, False, "⏹ Парсер остановлен!"
         )
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в stop_parser_handler: {e}")
+        await callback.answer("❌ Ошибка при остановке парсера")
 
 
 @router.callback_query(F.data.startswith("force_start_"))
 async def force_start_parser(callback: CallbackQuery):
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group = await GroupService.get_group(int(group_id))
+    """Принудительный запуск парсера"""
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    links_count = await ProductLink.filter(group_id = group_id).count()
+        if running_tasks.get(group_id):
+            await callback.answer("⚠️ Парсер уже запущен для этой группы")
+            return
 
-    if not links_count:
-        await callback.answer("В базе отсутствуют ссылки для парсинга.")
-        return
+        links_count = await ProductLink.filter(group_id = group_id).count()
 
-    await callback.answer("⏳ Запускаю парсер...", show_alert = False)
+        if not links_count:
+            await callback.answer("❌ В базе отсутствуют ссылки для парсинга.")
+            return
 
-    # Запускаем парсер для одной группы
-    await parse_single_group(group_id)
+        await callback.answer("⏳ Запускаю парсер...")
 
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
+        # Запускаем парсер
+        task = asyncio.create_task(parse_single_group(group_id))
+        running_tasks[group_id] = task
 
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {links_count}\n\n"
+        # Очистка задачи после завершения
+        def cleanup_task(future):
+            running_tasks.pop(group_id, None)
 
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
+        task.add_done_callback(cleanup_task)
 
-    await callback.message.answer(f"✅ Парсер для группы {group.title} завершен")
-    await callback.message.answer(
-        text = text,
-        reply_markup = group_detail_keyboard(
-            group_id = group_id,
-            site_id = int(site_id),
-            is_parser_active = group.is_active
-        )
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в force_start_parser: {e}")
+        await callback.answer("❌ Ошибка при запуске парсера")
 
 
 @router.callback_query(F.data.startswith("final_table_"))
-async def view_table(callback: CallbackQuery):
-    """Генерация и отправка таблицы со ссылками"""
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group_id = int(group_id)
+async def view_final_table(callback: CallbackQuery):
+    """Генерация и отправка финальной таблицы с результатами"""
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    group = await GroupService.get_group(group_id)
-    links = await ProductLink.filter(group_id = group_id).all()
+        group = await GroupService.get_group(group_id)
+        links = await ProductLink.filter(group_id = group_id).all()
 
-    if not links:
-        await callback.answer("❌ В этой группе пока нет ссылок.")
-        return
+        if not links:
+            await callback.answer("❌ В этой группе пока нет ссылок.")
+            return
 
-    # Проверяем, есть ли хотя бы один link с last_price != None
-    has_prices = any(link.last_price is not None for link in links)
+        # Проверка наличия цен
+        has_prices = any(link.last_price is not None for link in links)
+        if not has_prices:
+            await callback.answer("❌ Парсинг ещё не был выполнен.")
+            return
 
-    if not has_prices:
-        await callback.answer("❌ Парсинг ещё не был выполнен, данные не собраны.")
-        return
+        # Подготовка данных
+        links_data = _prepare_links_data(links, is_final = True)
+        excel_file = TableHandler.create_excel_with_autofit(links_data, group)
+        group_info_text = await _get_group_info_text(group_id)
 
-    links_data = [{
-        "Дата последней проверки": link.last_check.strftime("%d.%m.%Y"),
-        "Название товара": link.productName,
-        "Название компании": link.companyName,
-        "Стоимость": link.last_price,
-        "Ссылка": link.url
-    } for link in links]
+        await callback.message.answer_document(excel_file, caption = "Выходная таблица с данными")
+        await callback.message.answer(
+            group_info_text,
+            reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
+        )
 
-    excel_file = TableHandler.create_excel_with_autofit(links_data, group)
-
-    text_table = "Выходная таблица с данными"
-
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
-
-    links_count = await ProductLink.filter(group_id = group_id).count()
-
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {links_count}\n\n"
-
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-
-    await callback.message.answer_document(excel_file, caption = text_table)
-    await callback.message.answer(
-        text,
-        reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
-    )
+    except Exception as e:
+        logger.error(f"Ошибка в view_final_table: {e}")
+        await callback.answer("❌ Ошибка при генерации таблицы")
 
 
 @router.callback_query(F.data.startswith("price_analysis_"))
 async def price_analysis(callback: CallbackQuery):
-    _, _, group_id, site_id = parse_callback(callback.data)
-    group_id = int(group_id)
-    site_id = int(site_id)
-    group = await GroupService.get_group(group_id)
+    """Анализ цен и генерация отчета"""
+    try:
+        _, _, group_id, site_id = parse_callback(callback.data)
 
-    parser_text = (
-        "⏸ Остановить парсер — остановить процесс парсинга по расписанию.\n"
-        if group.is_active else
-        "▶️ Запустить парсер — запустить процесс парсинга по расписанию.\n"
-    )
+        group = await GroupService.get_group(group_id)
+        excel_file = await generate_price_diff_excel(group_id)
 
-    links_count = await ProductLink.filter(group_id = group_id).count()
+        if not excel_file:
+            await callback.answer("❌ Нет данных для анализа цен")
+            return
 
-    text = (
-        f"ℹ️ Информация о группе:\n\n"
-        f"Название: {group.title}\n"
-        f"Дата создания: {group.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-        f"Статус: {'Активна ✅' if group.is_active else 'Неактивна ❌'}\n"
-        f"Количество ссылок для анализа: {links_count}\n\n"
+        group_info_text = await _get_group_info_text(group_id)
 
-        "Доступные действия:\n"
-        "📊 Просмотреть таблицу — посмотреть содержимое выбранной таблицы.\n"
-        "📑 Просмотр последних результатов — увидеть итоговые данные последних парсеров.\n"
-        "➕ Добавить таблицу — создать новую таблицу для данных (если добавить несколько раз разных таблиц,"
-        " ссылки складываются в основную таблицу).\n"
-        "❌ Удалить таблицу — удалить ненужную таблицу.\n"
-        f"{parser_text}"
-        "⏭ Принудительный запуск — запустить парсер немедленно, игнорируя расписание.\n"
-        "📈 Получение анализа — получить аналитические данные по текущим таблицам.\n\n"
-        "Выберите действие, которое хотите выполнить, используя кнопки ниже ⬇️"
-    )
-
-    excel_file = await generate_price_diff_excel(group_id)
-    if not excel_file:
-        await callback.answer("❌ Нет данных для анализа (нет цен).", show_alert = True)
-        return
-
-    await callback.message.answer_document(
-        document = BufferedInputFile(excel_file.getvalue(), filename = f"Анализ_группы_{group.title}.xlsx"),
-        caption = f"📊 Анализ цен группы {group_id}"
-    )
-    await callback.message.answer(
-        text = text,
-        reply_markup = group_detail_keyboard(
-            group_id = group_id,
-            site_id = int(site_id),
-            is_parser_active = group.is_active
+        await callback.message.answer_document(
+            document = BufferedInputFile(
+                excel_file.getvalue(),
+                filename = f"Анализ_группы_{group.title}.xlsx"
+            ),
+            caption = f"📊 Анализ цен группы {group.title}"
         )
-    )
-    await callback.answer()
+
+        await callback.message.answer(
+            text = group_info_text,
+            reply_markup = group_detail_keyboard(
+                group_id = group_id,
+                site_id = site_id,
+                is_parser_active = group.is_active
+            )
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Ошибка в price_analysis: {e}")
+        await callback.answer("❌ Ошибка при анализе цен")

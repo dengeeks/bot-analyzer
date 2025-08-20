@@ -1,7 +1,7 @@
 import asyncio
 import io
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Union
 
 import aiohttp
@@ -19,6 +19,36 @@ from core.config import load_config
 logger = logging.getLogger(__name__)
 config = load_config()
 bot = Bot(token = config.tg_bot.token)
+
+import time
+
+
+def format_progress(start_time: float, current: int, total: int) -> str:
+    # Проценты
+    percent = int((current / total) * 100) if total > 0 else 0
+    # Прогресс-бар
+    bar_length = 10
+    filled_length = int(bar_length * current // total) if total > 0 else 0
+    bar = "█" * filled_length + "░" * (bar_length - filled_length)
+
+    # Время
+    elapsed = int(time.time() - start_time)
+    elapsed_str = time.strftime("%Mм %Ss", time.gmtime(elapsed))
+
+    # Примерное оставшееся время
+    if current > 0:
+        estimated_total = elapsed * total // current
+        remaining = estimated_total - elapsed
+    else:
+        remaining = 0
+    remaining_str = time.strftime("%Mм %Ss", time.gmtime(remaining))
+
+    # Формат текста
+    return (
+        f"⏱ Время: {elapsed_str}\n"
+        f"📦 Прогресс: [{bar}] {percent}% ({current}/{total})\n"
+        f"⏳ Осталось примерно: {remaining_str}"
+    )
 
 
 class ProductParser:
@@ -85,15 +115,17 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
     return output
 
 
-async def process_group(group: ProductGroup, parser: ProductParser):
+async def process_group(group: ProductGroup, parser: ProductParser, with_stop_button: bool = False):
     """Парсинг ссылок группы, обновление базы и отправка Excel пользователю."""
     logger.info(f"Обрабатываю группу '{group.title}' (id={group.id})")
     data = []
     total_links = len(group.product_links)
     parsed_links = 0
+    last_text = None
+    start_time = time.time()
 
     async with in_transaction() as conn:
-        for link in group.product_links:
+        for idx, link in enumerate(group.product_links, start = 1):
             product = await parser.parse_product(link.url)
             if not product:
                 logger.warning(f"Не удалось спарсить {link.url}")
@@ -112,13 +144,13 @@ async def process_group(group: ProductGroup, parser: ProductParser):
                 price_value = 0.0
 
             link.last_price = price_value
-            link.last_check = datetime.utcnow()
+            link.last_check = datetime.now(timezone.utc)
             await link.save(using_db = conn)
 
             await PriceHistory.create(
                 product_link = link,
                 price = int(price_value),
-                date = datetime.utcnow(),
+                date = datetime.now(timezone.utc),
                 using_db = conn
             )
 
@@ -132,6 +164,28 @@ async def process_group(group: ProductGroup, parser: ProductParser):
                 }
             )
             parsed_links += 1
+
+            # 🔴 Добавляем прогресс-бар
+            progress_bar = format_progress(start_time, idx, total_links)
+            new_text = f"Прогресс парсинга группы: {group.title}\n{progress_bar}"
+
+            # если хочешь в Телеграм — редактируй сообщение
+            if group.user.telegram_id:
+                try:
+                    if idx == 1:  # первое сообщение — отправляем
+                        msg = await bot.send_message(
+                            group.user.telegram_id, f"Прогресс парсинга группы: {group.title}\n{progress_bar}",
+                        )
+                    else:  # дальше редактируем
+                        if new_text != last_text:  # 🔴 проверяем
+                            await bot.edit_message_text(
+                                chat_id = group.user.telegram_id,
+                                message_id = msg.message_id,
+                                text = new_text,
+                            )
+                            last_text = new_text
+                except Exception as e:
+                    logger.warning(f"Не удалось обновить прогресс: {e}")
 
     if data and group.user.telegram_id:
         excel_file = await generate_excel(data)

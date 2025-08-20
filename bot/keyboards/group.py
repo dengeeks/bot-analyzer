@@ -36,20 +36,19 @@ def groups_list_keyboard(
 
 
 def delete_groups_keyboard(
-        groups: List[ProductGroup], site_id: int, page: int = 1, per_page: int = 5
+        groups: List[ProductGroup], site_id: int, page: int = 1, per_page: int = 6
 ) -> InlineKeyboardMarkup:
     page_items, total_pages = paginate(groups, page, per_page)
     builder = InlineKeyboardBuilder()
 
     for g in page_items:
         builder.button(text = g.title, callback_data = f"group_delete_{g.id}_{site_id}_{page}")
-    builder.adjust(2)
 
     if page > 1:
         builder.button(text = "◀️", callback_data = f"delete_groups_page_{site_id}_{page - 1}")
     if page < total_pages:
         builder.button(text = "▶️", callback_data = f"delete_groups_page_{site_id}_{page + 1}")
-    builder.adjust(2)
+    builder.adjust(3, 3, 1)
 
     builder.row(back_button(f"site_{site_id}"))
     return builder.as_markup()
@@ -70,7 +69,7 @@ def group_detail_keyboard(group_id: int, site_id: int, is_parser_active: bool = 
 
     # Новые кнопки
     builder.button(text = "⏭ Принудительный запуск", callback_data = f"force_start_{group_id}_{site_id}")
-    builder.button(text="📈 Получение анализа", callback_data=f"price_analysis_{group_id}_{site_id}")
+    builder.button(text = "📈 Получение анализа", callback_data = f"price_analysis_{group_id}_{site_id}")
 
     builder.adjust(2, 2, 2, 1, 1)
     builder.row(InlineKeyboardButton(text = "⬅️ Назад к списку групп", callback_data = f"read_groups_{site_id}"))
@@ -80,6 +79,6 @@ def group_detail_keyboard(group_id: int, site_id: int, is_parser_active: bool = 
 def confirm_delete_group_keyboard(group_id: int, site_id: int, page: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text = "✅ Подтвердить", callback_data = f"group_confirm_{group_id}_{site_id}_{page}")
-    builder.button(text = "❌ Отменить", callback_data = f"group_cancel_{site_id}_{page}")
+    builder.button(text = "❌ Отменить", callback_data = f"group_cancel_{group_id}_{site_id}_{page}")
     builder.adjust(2)
     return builder.as_markup()
