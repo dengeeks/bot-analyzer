@@ -4,6 +4,7 @@ from typing import Optional
 
 import pandas as pd
 from aiogram.types import BufferedInputFile
+from openpyxl.styles import Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from bot.database.models.product_link import ProductLink
@@ -32,18 +33,68 @@ class TableHandler:
         """Создание Excel файла с автоматической подгонкой ширины столбцов"""
         df = pd.DataFrame(links_data)
 
+        thin_border = Border(
+            left = Side(style = 'thin'),
+            right = Side(style = 'thin'),
+            top = Side(style = 'thin'),
+            bottom = Side(style = 'thin')
+        )
+
         with pd.ExcelWriter("temp.xlsx", engine = 'openpyxl') as writer:
             df.to_excel(writer, index = False)
             workbook = writer.book
             worksheet = writer.sheets['Sheet1']
 
+            # Автоподгонка ширины столбцов и настройка высоты строк
             for column in worksheet.columns:
-                max_length = max(
-                    (len(str(cell.value)) for cell in column),
-                    default = 10
-                )
-                adjusted_width = (max_length + 2) * 1.2
+                max_length = 0
                 column_letter = get_column_letter(column[0].column)
+                contains_company_name = False
+                contains_product_name = False
+                contains_url_to_product_name = False
+                contains_date_name = False
+                contains_price_name = False
+
+                # Проверяем ячейки столбца
+                for cell in column:
+                    try:
+                        if cell.value is not None:
+                            text = str(cell.value)
+                            # Проверяем наличие "Название компании"
+                            if "Название компании" in text:
+                                contains_company_name = True
+                            elif 'Название продукта' in text or 'Название товара' in text:
+                                contains_product_name = True
+                            elif 'Ссылка на товар' in text or 'Ссылка' in text:
+                                contains_url_to_product_name = True
+                            elif 'Дата последней проверки' in text:
+                                contains_date_name = True
+                            elif 'Стоимость' in text:
+                                contains_price_name = True
+
+                            # Рассчитываем длину для автоподгонки
+                            line_lengths = [len(line) for line in text.split('\n')]
+                            cell_max_length = max(line_lengths, default = 0)
+                            max_length = max(max_length, cell_max_length)
+
+                            cell.alignment = Alignment(wrap_text = True)
+                            cell.border = thin_border
+                    except:
+                        pass
+
+                # Устанавливаем ширину столбца
+                if contains_company_name:
+                    adjusted_width = 25
+                elif contains_product_name:
+                    adjusted_width = 60
+                elif contains_url_to_product_name:
+                    adjusted_width = 100
+                elif contains_date_name:
+                    adjusted_width = 15
+                elif contains_price_name:
+                    adjusted_width = 15
+                else:
+                    adjusted_width = min((max_length + 2) * 1.1, 50)  # Автоподгонка для остальных
                 worksheet.column_dimensions[column_letter].width = adjusted_width
 
         with open("temp.xlsx", "rb") as f:
