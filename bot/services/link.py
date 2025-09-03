@@ -86,7 +86,7 @@ class TableHandler:
                 if contains_company_name:
                     adjusted_width = 25
                 elif contains_product_name:
-                    adjusted_width = 60
+                    adjusted_width = 55
                 elif contains_url_to_product_name:
                     adjusted_width = 100
                 elif contains_date_name:
