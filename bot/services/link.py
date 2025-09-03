@@ -84,9 +84,9 @@ class TableHandler:
 
                 # Устанавливаем ширину столбца
                 if contains_company_name:
-                    adjusted_width = 25
+                    adjusted_width = 23
                 elif contains_product_name:
-                    adjusted_width = 55
+                    adjusted_width = 50
                 elif contains_url_to_product_name:
                     adjusted_width = 100
                 elif contains_date_name:

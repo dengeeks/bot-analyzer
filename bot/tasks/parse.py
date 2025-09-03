@@ -110,7 +110,7 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
         bottom = Side(style = 'thin')
     )
 
-    with pd.ExcelWriter("temp.xlsx", engine = 'openpyxl') as writer:
+    with pd.ExcelWriter(output, engine = 'openpyxl') as writer:
         df.to_excel(writer, index = False)
         workbook = writer.book
         worksheet = writer.sheets['Sheet1']
@@ -154,9 +154,9 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
 
             # Устанавливаем ширину столбца
             if contains_company_name:
-                adjusted_width = 25
+                adjusted_width = 23
             elif contains_product_name:
-                adjusted_width = 55
+                adjusted_width = 50
             elif contains_url_to_product_name:
                 adjusted_width = 100
             elif contains_date_name:
