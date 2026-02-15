@@ -319,7 +319,7 @@ async def process_olx_group(group: ProductGroup):
 
             if success:
                 group.last_check = datetime.now(timezone.utc)
-                await group.save(using_db=True)
+                await group.save()
 
                 try:
                     async with in_transaction() as conn:

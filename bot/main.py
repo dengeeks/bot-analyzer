@@ -45,7 +45,7 @@ async def main():
 
     scheduler = AsyncIOScheduler(timezone = 'Europe/Moscow')
     scheduler.add_job(parse_satu_groups, trigger = 'cron', hour = 9, minute = 3)
-    scheduler.add_job(parse_olx_groups, trigger='interval', minutes=5)
+    scheduler.add_job(parse_olx_groups, trigger='interval', minutes=60)
     scheduler.start()
 
     # Регистрируем роутеры
