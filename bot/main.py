@@ -7,7 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.handlers import start, site, group, link
-from bot.tasks.parse import parse_all_groups
+from bot.tasks.parse import  parse_satu_groups, parse_olx_groups
 from core.config import load_config
 
 
@@ -44,7 +44,8 @@ async def main():
     dp = Dispatcher(storage = MemoryStorage())
 
     scheduler = AsyncIOScheduler(timezone = 'Europe/Moscow')
-    scheduler.add_job(parse_all_groups, trigger = 'cron', hour = 9, minute = 3)
+    scheduler.add_job(parse_satu_groups, trigger = 'cron', hour = 9, minute = 3)
+    scheduler.add_job(parse_olx_groups, trigger='interval', minutes=5)
     scheduler.start()
 
     # Регистрируем роутеры

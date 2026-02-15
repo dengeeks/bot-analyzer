@@ -14,7 +14,7 @@ from bot.services.group import GroupService
 logger = logging.getLogger(__name__)
 
 
-async def _process_links(urls: pd.Series, group_id: int) -> int:
+async def _process_links(urls: pd.Series, group_id: int, site_title: str) -> int:
     """Обработка и сохранение списка ссылок"""
     created_count = 0
     for url in urls.dropna().unique():
@@ -22,19 +22,26 @@ async def _process_links(urls: pd.Series, group_id: int) -> int:
         if not url:
             continue
 
-        # Валидация: проверяем, что ссылка начинается с https://satu.kz
-        if not url.startswith('https://satu.kz'):
-            logger.warning(f"Пропущена ссылка {url}: должна начинаться с https://satu.kz")
-            continue
+
+        if site_title == "SATU KZ":
+            # Валидация: проверяем, что ссылка начинается с https://satu.kz
+            if not url.startswith('https://satu.kz'):
+                logger.warning(f"Пропущена ссылка {url}: должна начинаться с https://satu.kz")
+                continue
+        else:
+            # Валидация: проверяем, что ссылка начинается с https://satu.kz
+            if not url.startswith('https://www.olx.kz'):
+                logger.warning(f"Пропущена ссылка {url}: должна начинаться с https://www.olx.kz")
+                continue
 
         try:
             await ProductLink.create(
-                group_id = group_id,
-                url = url,
-                companyName = None,
-                productName = None,
-                last_price = None,
-                last_check = None
+                group_id=group_id,
+                url=url,
+                companyName=None,
+                productName=None,
+                last_price=None,
+                last_check=None
             )
             created_count += 1
         except Exception as e:
@@ -61,7 +68,7 @@ async def _send_group_info(
     )
     await message.answer(
         text,
-        reply_markup = group_detail_keyboard(group_id, site_id, group.is_active)
+        reply_markup=group_detail_keyboard(group_id, site_id, group.is_active)
     )
 
 
@@ -80,86 +87,94 @@ def _generate_group_info_text(group: Any, links_count: Optional[int] = None) -> 
     return base_text
 
 
-# async def generate_price_diff_excel(group_id: int) -> io.BytesIO:
-#     """
-#     Генерация Excel с анализом разницы цен вчера/сегодня для всех ссылок в группе.
-#     """
-#     today = date.today()
-#     yesterday = today - timedelta(days = 1)
-#
-#     start_today = datetime.combine(today, datetime.min.time())
-#     end_today = datetime.combine(today, datetime.max.time())
-#
-#     start_yesterday = datetime.combine(yesterday, datetime.min.time())
-#     end_yesterday = datetime.combine(yesterday, datetime.max.time())
-#
-#     links = await ProductLink.filter(group_id = group_id).all()
-#     if not links:
-#         return None
-#
-#     data_rows = []
-#     for link in links:
-#         yesterday_price_obj = await PriceHistory.filter(
-#             product_link = link,
-#             date__gte = start_yesterday,
-#             date__lte = end_yesterday
-#         ).order_by('-date').first()
-#
-#         today_price_obj = await PriceHistory.filter(
-#             product_link = link,
-#             date__gte = start_today,
-#             date__lte = end_today
-#         ).order_by('-date').first()
-#
-#         if not yesterday_price_obj or not today_price_obj:
-#             continue
-#
-#         diff = today_price_obj.price - yesterday_price_obj.price
-#         percent = round((diff / yesterday_price_obj.price * 100) if yesterday_price_obj.price else 0, 0)
-#         sign = "🔺" if diff > 0 else ("🔻" if diff < 0 else "➖")
-#
-#         data_rows.append(
-#             {
-#                 "Компания": link.companyName or "",
-#                 "Товар": link.productName or "",
-#                 "Цена вчера": yesterday_price_obj.price,
-#                 "Цена сегодня": today_price_obj.price,
-#                 "Разница": diff,
-#                 "%": percent,
-#                 "Символ": sign,
-#                 "Ссылка": link.url
-#             }
-#         )
-#
-#     if not data_rows:
-#         return None
-#
-#     df = pd.DataFrame(data_rows)
-#     output = io.BytesIO()
-#     with pd.ExcelWriter(output, engine = "openpyxl") as writer:
-#         df.to_excel(writer, index = False, sheet_name = "Анализ цен")
-#         worksheet = writer.sheets["Анализ цен"]
-#
-#         for col in worksheet.columns:
-#             max_length = max((len(str(cell.value)) for cell in col), default = 10)
-#             worksheet.column_dimensions[get_column_letter(col[0].column)].width = (max_length + 2) * 1.2
-#
-#     output.seek(0)
-#     return output
+async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
+    """
+    Сравнивает только ПОСЛЕДНИЙ и ПРЕДПОСЛЕДНИЙ парсинг.
+    Показывает прирост просмотров за этот период.
+    """
+    links = await ProductLink.filter(group_id=group_id).all()
+    if not links:
+        return None
+
+    data_rows = []
+
+    for link in links:
+        last_records = await PriceHistory.filter(product_link=link).order_by('-date').limit(2)
+
+        if not last_records:
+            continue
+
+        current_rec = last_records[0]
+        current_views = current_rec.views if current_rec.views is not None else 0
+
+        if len(last_records) == 2:
+            prev_rec = last_records[1]
+            prev_views = prev_rec.views if prev_rec.views is not None else 0
+
+            diff = current_views - prev_views
+
+            if diff > 0:
+                sign = f"➕{diff}"
+            elif diff < 0:
+                sign = f"➖{abs(diff)}"
+            else:
+                sign = "0"
+
+            prev_date_str = prev_rec.date.strftime("%d.%m %H:%M")
+        else:
+            prev_views = 0
+            sign = "🆕 Новый"
+            prev_date_str = "-"
+
+        # Формируем строку для отчета
+        data_rows.append({
+            "Дата проверки": current_rec.date.strftime("%d.%m.%Y %H:%M"),
+            "Всего просмотров": current_views,
+            "Прирост": sign,
+            "Было (дата)": f"{prev_views} ({prev_date_str})",
+            "Ссылка": link.url
+        })
+
+    if not data_rows:
+        return None
+
+    # Создаем DataFrame
+    df = pd.DataFrame(data_rows)
+
+    # Сохраняем
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Прирост просмотров")
+        worksheet = writer.sheets["Прирост просмотров"]
+
+        # Автоширина колонок
+        for i, col in enumerate(worksheet.columns):
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            worksheet.column_dimensions[column].width = (max_length + 2) * 1.1
+
+    output.seek(0)
+    return output
 
 async def generate_price_diff_excel(group_id: int) -> io.BytesIO:
     """
     Генерация Excel с анализом разницы между последней и предпоследней ценой
     для всех ссылок в группе.
     """
-    links = await ProductLink.filter(group_id = group_id).all()
+    links = await ProductLink.filter(group_id=group_id).all()
     if not links:
         return None
 
     data_rows = []
     for link in links:
         # Берём последние две цены
-        price_objs = await PriceHistory.filter(product_link = link).order_by('-date').limit(2)
+        price_objs = await PriceHistory.filter(product_link=link).order_by('-date').limit(2)
 
         if len(price_objs) < 2:
             # Мало данных для сравнения
@@ -202,13 +217,13 @@ async def generate_price_diff_excel(group_id: int) -> io.BytesIO:
 
     df = pd.DataFrame(data_rows)
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine = "openpyxl") as writer:
-        df.to_excel(writer, index = False, sheet_name = "Анализ цен")
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Анализ цен")
         worksheet = writer.sheets["Анализ цен"]
 
         # Автоширина колонок
         for col in worksheet.columns:
-            max_length = max((len(str(cell.value)) for cell in col), default = 10)
+            max_length = max((len(str(cell.value)) for cell in col), default=10)
             worksheet.column_dimensions[get_column_letter(col[0].column)].width = (max_length + 2) * 1.2
 
     output.seek(0)

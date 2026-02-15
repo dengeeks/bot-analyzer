@@ -10,7 +10,7 @@ services:
     volumes:
       - .:/app
     command: python3 -m setup
-    #restart: always
+    restart: always
     env_file:
       - ".env"
 
@@ -21,7 +21,7 @@ services:
         max-file: "10"
 
   pg_database:
-    image: postgres
+    image: postgres:17
     ports:
       - "5439:5432"
     restart: always

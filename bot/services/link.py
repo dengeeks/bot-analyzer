@@ -54,6 +54,7 @@ class TableHandler:
                 contains_url_to_product_name = False
                 contains_date_name = False
                 contains_price_name = False
+                contains_views_name = False
 
                 # Проверяем ячейки столбца
                 for cell in column:
@@ -71,6 +72,8 @@ class TableHandler:
                                 contains_date_name = True
                             elif 'Стоимость' in text:
                                 contains_price_name = True
+                            elif 'Кол-во просмотров' in text:
+                                contains_views_name = True
 
                             # Рассчитываем длину для автоподгонки
                             line_lengths = [len(line) for line in text.split('\n')]
@@ -92,6 +95,8 @@ class TableHandler:
                 elif contains_date_name:
                     adjusted_width = 15
                 elif contains_price_name:
+                    adjusted_width = 15
+                elif contains_views_name:
                     adjusted_width = 15
                 else:
                     adjusted_width = min((max_length + 2) * 1.1, 50)  # Автоподгонка для остальных

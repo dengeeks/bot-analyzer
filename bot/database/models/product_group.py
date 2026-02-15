@@ -16,6 +16,7 @@ class ProductGroup(Model):
         on_delete=fields.CASCADE
     )
     is_active = fields.BooleanField(default=False)
+    last_check = fields.DatetimeField(null = True)
 
     product_links: fields.ReverseRelation["ProductLink"]
 

@@ -17,8 +17,8 @@ from bot.services.group import GroupService
 from bot.services.link import LinkService, TableHandler
 from bot.tasks.parse import parse_single_group
 from bot.utils.callback import parse_callback
-from bot.utils.group import _get_group_info_text
-from bot.utils.link import _process_links, generate_price_diff_excel
+from bot.utils.group import _get_group_info_text, _get_add_table_info_text
+from bot.utils.link import _process_links, generate_price_diff_excel, generate_last_views_diff_excel
 from core.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -39,17 +39,17 @@ async def _update_parser_status_and_respond(
         success_message: str
 ) -> None:
     """Общая функция для обновления статуса парсера и ответа"""
-    await GroupService.update_parser_status(group_id, is_active = is_active)
+    await GroupService.update_parser_status(group_id, is_active=is_active)
     group = await GroupService.get_group(group_id)
     group_info_text = await _get_group_info_text(group_id)
 
     await callback.answer(success_message)
     await callback.message.edit_text(
-        text = group_info_text,
-        reply_markup = group_detail_keyboard(
-            group_id = group_id,
-            site_id = site_id,
-            is_parser_active = group.is_active
+        text=group_info_text,
+        reply_markup=group_detail_keyboard(
+            group_id=group_id,
+            site_id=site_id,
+            is_parser_active=group.is_active
         )
     )
 
@@ -72,27 +72,29 @@ def _prepare_links_data(links, is_final: bool = False) -> list:
         } for link in links]
 
 
+def _prepare_olx_links_data(links) -> list:
+    """Подготавливает данные ссылок для Excel"""
+    return [{
+        "Ссылка на товар": link.url,
+        "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A",
+
+    } for link in links]
+
+
 @router.callback_query(F.data.startswith("add_table_"))
 async def add_table_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик начала загрузки таблицы"""
     try:
         _, _, group_id, site_id = parse_callback(callback.data)
 
-        await state.update_data(group_id = int(group_id), site_id = int(site_id))
+        await state.update_data(group_id=int(group_id), site_id=int(site_id))
         await state.set_state(TableStates.uploading_table)
 
-        instruction_text = (
-            "📁 Пожалуйста, отправьте файл таблицы в формате `.xlsx` или `.csv`.\n\n"
-            "⚠️ Обязательно должна быть колонка с названием <b>`Ссылка на товар`</b>.\n"
-            "⚠️ Все ссылки должны начинаться с <b>`https://satu.kz/`</b>.\n"
-            "ℹ️ Остальные колонки не обязательны — бот обработает только ссылки.\n\n"
-            "Пример допустимого файла:\n"
-            "Название | Ссылка на товар\n"
-            "Товар 1  | https://satu.kz/...\n"
-            "Товар 2  | https://satu.kz/..."
-        )
+        # Генерация ответа
+        group = await GroupService.get_group(group_id)
+        add_table_info_text = await _get_add_table_info_text(group)
 
-        await callback.message.answer(instruction_text)
+        await callback.message.answer(add_table_info_text)
         await callback.answer()
 
     except Exception as e:
@@ -109,15 +111,19 @@ async def upload_table(message: Message, state: FSMContext):
         group_id = data["group_id"]
         site_id = data["site_id"]
 
+        group = await GroupService.get_group(group_id)
+        await group.fetch_related("site")
+        site_title = group.site.title
+
         # Скачивание файла
         file_bytes = io.BytesIO()
-        await message.bot.download(message.document.file_id, destination = file_bytes)
+        await message.bot.download(message.document.file_id, destination=file_bytes)
 
         # Валидация и чтение файла
-        df = await FileProcessor.process_file(file_bytes, message.document.file_name)
+        df = await FileProcessor.process_file(file_bytes, message.document.file_name, site_title)
 
         # Обработка ссылок
-        created_count = await _process_links(df["Ссылка на товар"], group_id)
+        created_count = await _process_links(df["Ссылка на товар"], group_id, site_title)
 
         # Генерация ответа
         group_info_text = await _get_group_info_text(group_id)
@@ -126,7 +132,7 @@ async def upload_table(message: Message, state: FSMContext):
         await message.answer(f'✅ Успешно добавлено {created_count} ссылок')
         await message.answer(
             group_info_text,
-            reply_markup = group_detail_keyboard(group_id, site_id, group.is_active),
+            reply_markup=group_detail_keyboard(group_id, site_id, group.is_active),
         )
 
     except ValueError as e:
@@ -146,21 +152,21 @@ async def view_table_handler(callback: CallbackQuery):
         _, _, group_id, site_id = parse_callback(callback.data)
 
         group = await GroupService.get_group(group_id)
-        links = await ProductLink.filter(group_id = group_id).all()
+        links = await ProductLink.filter(group_id=group_id).all()
 
         if not links:
             await callback.answer("ℹ️ В этой группе пока нет ссылок для анализа.")
             return
 
         # Подготовка данных для Excel
-        links_data = _prepare_links_data(links, is_final = False)
+        links_data = _prepare_links_data(links, is_final=False)
         excel_file = TableHandler.create_excel_with_autofit(links_data, group)
         group_info_text = await _get_group_info_text(group_id)
 
-        await callback.message.answer_document(excel_file, caption = 'Входная таблица')
+        await callback.message.answer_document(excel_file, caption='Входная таблица')
         await callback.message.answer(
             group_info_text,
-            reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
+            reply_markup=group_detail_keyboard(group.id, site_id, group.is_active)
         )
         await callback.answer()
 
@@ -176,7 +182,7 @@ async def delete_links(callback: CallbackQuery):
         _, _, group_id, site_id = parse_callback(callback.data)
 
         group = await GroupService.get_group(group_id)
-        links_count = await ProductLink.filter(group_id = group_id).count()
+        links_count = await ProductLink.filter(group_id=group_id).count()
 
         if not links_count:
             await callback.answer("ℹ️ В этой группе пока нет ссылок для удаления.")
@@ -194,7 +200,7 @@ async def delete_links(callback: CallbackQuery):
 
         await callback.message.edit_text(
             confirmation_text,
-            reply_markup = confirm_delete_group_links_keyboard(group_id, site_id)
+            reply_markup=confirm_delete_group_links_keyboard(group_id, site_id)
         )
 
     except Exception as e:
@@ -219,7 +225,7 @@ async def process_delete_links_confirmation(callback: CallbackQuery):
 
         await callback.message.edit_text(
             group_info_text,
-            reply_markup = group_detail_keyboard(group_id, site_id, group.is_active)
+            reply_markup=group_detail_keyboard(group_id, site_id, group.is_active)
         )
 
     except Exception as e:
@@ -263,7 +269,7 @@ async def force_start_parser(callback: CallbackQuery):
             await callback.answer("⚠️ Парсер уже запущен для этой группы")
             return
 
-        links_count = await ProductLink.filter(group_id = group_id).count()
+        links_count = await ProductLink.filter(group_id=group_id).count()
 
         if not links_count:
             await callback.answer("❌ В базе отсутствуют ссылки для парсинга.")
@@ -293,27 +299,34 @@ async def view_final_table(callback: CallbackQuery):
         _, _, group_id, site_id = parse_callback(callback.data)
 
         group = await GroupService.get_group(group_id)
-        links = await ProductLink.filter(group_id = group_id).all()
+        await group.fetch_related('site')
+        site = group.site
 
+        links = await ProductLink.filter(group_id=group_id).all()
         if not links:
             await callback.answer("❌ В этой группе пока нет ссылок.")
             return
 
-        # Проверка наличия цен
-        has_prices = any(link.last_price is not None for link in links)
-        if not has_prices:
-            await callback.answer("❌ Парсинг ещё не был выполнен.")
-            return
+        if site.title == 'SATU KZ':
+            # Проверка наличия цен
+            has_prices = any(link.last_price is not None for link in links)
+            if not has_prices:
+                await callback.answer("❌ Парсинг ещё не был выполнен.")
+                return
 
         # Подготовка данных
-        links_data = _prepare_links_data(links, is_final = True)
+        if site.title == 'SATU KZ':
+            links_data = _prepare_links_data(links, is_final=True)
+        else:
+            links_data = _prepare_olx_links_data(links)
+
         excel_file = TableHandler.create_excel_with_autofit(links_data, group)
         group_info_text = await _get_group_info_text(group_id)
 
-        await callback.message.answer_document(excel_file, caption = "Выходная таблица с данными")
+        await callback.message.answer_document(excel_file, caption="Выходная таблица с данными")
         await callback.message.answer(
             group_info_text,
-            reply_markup = group_detail_keyboard(group.id, site_id, group.is_active)
+            reply_markup=group_detail_keyboard(group.id, site_id, group.is_active)
         )
 
     except Exception as e:
@@ -328,28 +341,46 @@ async def price_analysis(callback: CallbackQuery):
         _, _, group_id, site_id = parse_callback(callback.data)
 
         group = await GroupService.get_group(group_id)
-        excel_file = await generate_price_diff_excel(group_id)
+        await group.fetch_related('site')
+        site = group.site
 
-        if not excel_file:
-            await callback.answer("❌ Нет данных для анализа цен")
-            return
+        if site == 'SATU KZ':
+            excel_file = await generate_price_diff_excel(group_id)
+            if not excel_file:
+                await callback.answer("❌ Нет данных для анализа цен")
+                return
+        else:
+            excel_file = await generate_last_views_diff_excel(group_id)
+
+            if not excel_file:
+                await callback.answer("❌ Нет данных для анализа просмотров")
+                return
 
         group_info_text = await _get_group_info_text(group_id)
 
-        await callback.message.answer_document(
-            document = BufferedInputFile(
-                excel_file.getvalue(),
-                filename = f"Анализ_группы_{group.title}.xlsx"
-            ),
-            caption = f"📊 Анализ цен группы {group.title}"
-        )
+        if site == 'SATU KZ':
+            await callback.message.answer_document(
+                document=BufferedInputFile(
+                    excel_file.getvalue(),
+                    filename=f"Анализ_группы_{group.title}.xlsx"
+                ),
+                caption=f"📊 Анализ цен группы {group.title}"
+            )
+        else:
+            await callback.message.answer_document(
+                document=BufferedInputFile(
+                    excel_file.getvalue(),
+                    filename=f"Анализ_группы_{group.title}.xlsx"
+                ),
+                caption=f"📊 Анализ просмотров группы {group.title}"
+            )
 
         await callback.message.answer(
-            text = group_info_text,
-            reply_markup = group_detail_keyboard(
-                group_id = group_id,
-                site_id = site_id,
-                is_parser_active = group.is_active
+            text=group_info_text,
+            reply_markup=group_detail_keyboard(
+                group_id=group_id,
+                site_id=site_id,
+                is_parser_active=group.is_active
             )
         )
         await callback.answer()

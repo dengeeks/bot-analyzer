@@ -4,7 +4,8 @@ from tortoise.models import Model
 
 class PriceHistory(Model):
     id = fields.IntField(pk=True)
-    price = fields.IntField()
+    price = fields.IntField(null=True)
+    views = fields.IntField(null=True)
     date = fields.DatetimeField()
 
     product_link: fields.ForeignKeyRelation["ProductLink"] = fields.ForeignKeyField(

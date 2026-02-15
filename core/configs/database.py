@@ -80,6 +80,9 @@ async def init_tortoise(db: DbConfig, modules: dict):
     await Site.get_or_create(
         title = "SATU KZ"
     )
+    await Site.get_or_create(
+        title = "OLX KZ"
+    )
 
 
 async def close_tortoise():

@@ -1,9 +1,10 @@
 import asyncio
 import io
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Union
-
+from playwright.async_api import async_playwright
 import aiohttp
 import pandas as pd
 from aiogram import Bot
@@ -19,7 +20,7 @@ from core.config import load_config
 
 logger = logging.getLogger(__name__)
 config = load_config()
-bot = Bot(token = config.tg_bot.token)
+bot = Bot(token=config.tg_bot.token)
 
 import time
 
@@ -63,7 +64,7 @@ class ProductParser:
         """Асинхронный запрос с повторными попытками и обработкой ошибок."""
         for attempt in range(self.MAX_RETRIES):
             try:
-                async with self.session.get(url, timeout = aiohttp.ClientTimeout(total = 10)) as response:
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     response.raise_for_status()
                     return await response.text()
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -104,14 +105,14 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
     output = io.BytesIO()
 
     thin_border = Border(
-        left = Side(style = 'thin'),
-        right = Side(style = 'thin'),
-        top = Side(style = 'thin'),
-        bottom = Side(style = 'thin')
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
     )
 
-    with pd.ExcelWriter(output, engine = 'openpyxl') as writer:
-        df.to_excel(writer, index = False)
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False)
         workbook = writer.book
         worksheet = writer.sheets['Sheet1']
 
@@ -144,10 +145,10 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
 
                         # Рассчитываем длину для автоподгонки
                         line_lengths = [len(line) for line in text.split('\n')]
-                        cell_max_length = max(line_lengths, default = 0)
+                        cell_max_length = max(line_lengths, default=0)
                         max_length = max(max_length, cell_max_length)
 
-                        cell.alignment = Alignment(wrap_text = True)
+                        cell.alignment = Alignment(wrap_text=True)
                         cell.border = thin_border
                 except:
                     pass
@@ -181,7 +182,7 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
     start_time = time.time()
 
     async with in_transaction() as conn:
-        for idx, link in enumerate(group.product_links, start = 1):
+        for idx, link in enumerate(group.product_links, start=1):
             product = await parser.parse_product(link.url)
             if not product:
                 logger.warning(f"Не удалось спарсить {link.url}")
@@ -201,13 +202,13 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
 
             link.last_price = price_value
             link.last_check = datetime.now(timezone.utc)
-            await link.save(using_db = conn)
+            await link.save(using_db=conn)
 
             await PriceHistory.create(
-                product_link = link,
-                price = int(price_value),
-                date = datetime.now(timezone.utc),
-                using_db = conn
+                product_link=link,
+                price=int(price_value),
+                date=datetime.now(timezone.utc),
+                using_db=conn
             )
 
             data.append(
@@ -221,23 +222,21 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
             )
             parsed_links += 1
 
-            # 🔴 Добавляем прогресс-бар
             progress_bar = format_progress(start_time, idx, total_links)
             new_text = f"Прогресс парсинга группы: {group.title}\n{progress_bar}"
 
-            # если хочешь в Телеграм — редактируй сообщение
             if group.user.telegram_id:
                 try:
-                    if idx == 1:  # первое сообщение — отправляем
+                    if idx == 1:
                         msg = await bot.send_message(
                             group.user.telegram_id, f"Прогресс парсинга группы: {group.title}\n{progress_bar}",
                         )
                     else:  # дальше редактируем
                         if new_text != last_text:  # 🔴 проверяем
                             await bot.edit_message_text(
-                                chat_id = group.user.telegram_id,
-                                message_id = msg.message_id,
-                                text = new_text,
+                                chat_id=group.user.telegram_id,
+                                message_id=msg.message_id,
+                                text=new_text,
                             )
                             last_text = new_text
                 except Exception as e:
@@ -246,9 +245,9 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
     if data and group.user.telegram_id:
         excel_file = await generate_excel(data)
         await bot.send_document(
-            chat_id = group.user.telegram_id,
-            document = BufferedInputFile(excel_file.getvalue(), filename = f"{group.title}.xlsx"),
-            caption = (
+            chat_id=group.user.telegram_id,
+            document=BufferedInputFile(excel_file.getvalue(), filename=f"{group.title}.xlsx"),
+            caption=(
                 f"✅ Парсинг завершён.\nВсего ссылок: {total_links}\nУспешно спарсено: {parsed_links}\n\n"
                 f"Отчёт по группе: {group.title}"
             )
@@ -256,18 +255,161 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
         logger.info(f"Отчёт по группе '{group.title}' отправлен пользователю {group.user.telegram_id}")
 
 
-async def parse_all_groups():
+async def process_olx_group(group: ProductGroup):
+    """Специальный парсер для OLX через Playwright (для просмотров)."""
+    logger.info(f"Запуск OLX парсера для группы '{group.title}' (id={group.id})")
+
+    data = []
+    total_links = len(group.product_links)
+    parsed_links = 0
+    last_text = None
+    start_time = time.time()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
+
+        # Оставляем CSS (отключаем только картинки/видео/шрифты)
+        await context.route("**/*", lambda route: route.abort()
+        if route.request.resource_type in ["image", "media", "font"]
+        else route.continue_()
+                            )
+
+        page = await context.new_page()
+
+        for idx, link in enumerate(group.product_links, start=1):
+            views_count = 0
+            success = False
+
+            # --- ЦИКЛ ПОВТОРОВ ДЛЯ ОДНОЙ ССЫЛКИ ---
+            for attempt in range(1, 4):
+                try:
+                    response = await page.goto(link.url, wait_until="domcontentloaded", timeout=25000)
+                    content = await page.content()
+                    await asyncio.sleep(8)
+
+                    # 1. ПРОВЕРКА НА БЛОКИРОВКУ
+                    if response.status == 403 or "Request blocked" in content:
+                        logger.warning(f"⚠️ [Попытка {attempt}] Блок CloudFront для {link.url}. Ждем 30с...")
+                        await asyncio.sleep(30)
+                        continue  # Идем на следующую попытку
+
+                    # 2. СКРОЛЛ И ПОИСК ДАННЫХ
+                    await page.evaluate("window.scrollTo(0, 800)")
+                    selector = "//span[@data-testid='page-view-counter']"
+
+                    try:
+                        await page.wait_for_selector(selector, timeout=5000)
+                        text_content = await page.locator(selector).inner_text()
+                        match = re.search(r'\d+', text_content)
+                        if match:
+                            views_count = int(match.group())
+                            success = True
+                            break  # Нашли данные, выходим из цикла попыток
+                    except Exception:
+                        logger.warning(f"Счетчик не найден на странице: {link.url}")
+                        success = True  # Страница загрузилась, но счетчика нет (бывает)
+                        break
+
+                except Exception as e:
+                    logger.error(f"Ошибка на попытке {attempt} для {link.url}: {e}")
+                    await asyncio.sleep(5)
+
+            if success:
+                group.last_check = datetime.now(timezone.utc)
+                group.save(using_db=True)
+
+                try:
+                    async with in_transaction() as conn:
+                        link.views = float(views_count)
+                        link.last_check = datetime.now(timezone.utc)
+                        await link.save(using_db=conn)
+
+                        await PriceHistory.create(
+                            product_link=link,
+                            views=views_count,
+                            date=link.last_check,
+                            using_db=conn
+                        )
+                    parsed_links += 1
+                    data.append({
+                        "Дата проверки": link.last_check.strftime("%d.%m.%Y"),
+                        "Просмотры": views_count,
+                        "Ссылка": link.url,
+                    })
+                except Exception as e:
+                    logger.error(f"Ошибка записи в БД для {link.url}: {e}")
+
+            progress_bar = format_progress(start_time, idx, total_links)
+            new_text = f"🕵️‍♂️ Парсинг OLX (Просмотры): {group.title}\n{progress_bar}"
+
+            if group.user.telegram_id:
+                try:
+                    if idx == 1:
+                        msg = await bot.send_message(group.user.telegram_id, new_text)
+                    else:
+                        if msg and new_text != last_text:
+                            await bot.edit_message_text(
+                                chat_id=group.user.telegram_id,
+                                message_id=msg.message_id,
+                                text=new_text,
+                            )
+                            last_text = new_text
+                except Exception as e:
+                    logger.warning(f"Не удалось обновить прогресс: {e}")
+
+        await browser.close()
+
+    if data and group.user.telegram_id:
+        excel_file = await generate_excel(data)
+
+        await bot.send_document(
+            chat_id=group.user.telegram_id,
+            document=BufferedInputFile(excel_file.getvalue(), filename=f"OLX_Views_{group.title}.xlsx"),
+            caption=(
+                f"✅ Сбор просмотров завершён.\nВсего ссылок: {total_links}\nУспешно: {parsed_links}\n"
+            )
+        )
+
+
+async def parse_satu_groups():
     """Запуск фонового парсера по всем активным группам."""
     logger.info("Запуск фонового парсера...")
     async with aiohttp.ClientSession() as session:
         parser = ProductParser(session)
-        groups = await ProductGroup.filter(is_active = True).select_related("user").prefetch_related("product_links")
+        groups_satu = await ProductGroup.filter(is_active=True, site__title="SATU KZ").select_related(
+            "user").prefetch_related("product_links")
 
-        if not groups:
+        if not groups_satu:
             logger.info("Нет активных групп для парсинга")
             return
 
-        for group in groups:
+        for group in groups_satu:
+            await process_group(group, parser)
+
+    logger.info("Фоновый парсинг завершён ✅")
+
+
+async def parse_olx_groups():
+    """Запуск фонового парсера по всем активным группам."""
+    logger.info("Запуск фонового парсера...")
+    async with aiohttp.ClientSession() as session:
+        parser = ProductParser(session)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+        groups_olx = await ProductGroup.filter(
+            is_active=True,
+            site__title="OLX KZ",
+            last_check__lte=seven_days_ago
+        ).select_related("user").prefetch_related("product_links")
+
+        if not groups_olx:
+            logger.info("Нет активных групп для парсинга")
+            return
+
+        for group in groups_olx:
             await process_group(group, parser)
 
     logger.info("Фоновый парсинг завершён ✅")
@@ -275,14 +417,18 @@ async def parse_all_groups():
 
 async def parse_single_group(group_id: int):
     """Принудительный запуск парсинга только для одной группы."""
-    group = await ProductGroup.get(id = group_id).select_related("user").prefetch_related("product_links")
+    group = await ProductGroup.get(id=group_id).select_related("user").prefetch_related("product_links", "site")
+    site = group.site.title
 
     if not group:
         logger.warning(f"Группа с id={group_id} не найдена")
         return
 
-    async with aiohttp.ClientSession() as session:
-        parser = ProductParser(session)
-        await process_group(group, parser)
+    if site == 'SATU KZ':
+        async with aiohttp.ClientSession() as session:
+            parser = ProductParser(session)
+            await process_group(group, parser)
+    else:
+        await process_olx_group(group)
 
     logger.info(f"Принудительный парсинг группы '{group.title}' (id={group.id}) завершён ✅")

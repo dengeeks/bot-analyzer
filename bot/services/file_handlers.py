@@ -119,7 +119,7 @@ class FileProcessor:
     REQUIRED_COLUMNS = ['Ссылка на товар']
 
     @staticmethod
-    async def process_file(file_bytes: io.BytesIO, filename: str) -> DataFrame:
+    async def process_file(file_bytes: io.BytesIO, filename: str, site_title: str) -> DataFrame:
         """
         Обрабатывает файл и возвращает DataFrame с валидацией бизнес-правил
         """
@@ -143,11 +143,19 @@ class FileProcessor:
                     f"В таблице отсутствуют обязательные колонки: {', '.join(missing_columns)}"
                 )
 
-            # Дополнительная валидация URL (опционально)
-            if 'Ссылка на товар' in df.columns:
-                invalid_urls = df[~df['Ссылка на товар'].str.startswith('https://satu.kz/', na = False)]
-                if not invalid_urls.empty:
-                    logger.warning(f"Найдено {len(invalid_urls)} ссылок не с satu.kz")
+
+            if site_title == "SATU KZ":
+                # Дополнительная валидация URL (опционально)
+                if 'Ссылка на товар' in df.columns:
+                    invalid_urls = df[~df['Ссылка на товар'].str.startswith('https://satu.kz/', na=False)]
+                    if not invalid_urls.empty:
+                        logger.warning(f"Найдено {len(invalid_urls)} ссылок не с satu.kz")
+            else:
+                # Дополнительная валидация URL (опционально)
+                if 'Ссылка на товар' in df.columns:
+                    invalid_urls = df[~df['Ссылка на товар'].str.startswith('https://www.olx.kz/', na=False)]
+                    if not invalid_urls.empty:
+                        logger.warning(f"Найдено {len(invalid_urls)} ссылок не с www.olx.kz")
 
             return df
 

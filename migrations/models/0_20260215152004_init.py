@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS "productgroup" (
     "title" VARCHAR(255) NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "is_active" BOOL NOT NULL DEFAULT False,
+    "last_check" TIMESTAMPTZ,
     "site_id" INT NOT NULL REFERENCES "site" ("id") ON DELETE CASCADE,
     "user_id" INT NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE
 );
@@ -34,7 +35,8 @@ CREATE TABLE IF NOT EXISTS "productlink" (
 );
 CREATE TABLE IF NOT EXISTS "pricehistory" (
     "id" SERIAL NOT NULL PRIMARY KEY,
-    "price" INT NOT NULL,
+    "price" INT,
+    "views" INT,
     "date" TIMESTAMPTZ NOT NULL,
     "product_link_id" INT NOT NULL REFERENCES "productlink" ("id") ON DELETE CASCADE
 );
