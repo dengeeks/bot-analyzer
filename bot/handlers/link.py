@@ -79,9 +79,10 @@ async def _prepare_olx_links_data(links) -> list:
 
     for link in links:
         last_history = await PriceHistory.filter(product_link_id=link.id).order_by("-date").first()
+        current_views = last_history.views if last_history is not None else 0
         result.append({
             "Ссылка на товар": link.url,
-            "Кол-во просмотров": last_history.views,
+            "Кол-во просмотров": current_views,
             "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A"
         }
         )
