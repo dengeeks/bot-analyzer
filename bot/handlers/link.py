@@ -7,6 +7,7 @@ from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, BufferedInputFile
 
+from bot.database.models.price_history import PriceHistory
 from bot.database.models.product_link import ProductLink
 from bot.filters.admin import AdminFilter
 from bot.fsm.link import TableStates
@@ -72,13 +73,19 @@ def _prepare_links_data(links, is_final: bool = False) -> list:
         } for link in links]
 
 
-def _prepare_olx_links_data(links) -> list:
+async def _prepare_olx_links_data(links) -> list:
     """Подготавливает данные ссылок для Excel"""
-    return [{
-        "Ссылка на товар": link.url,
-        "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A",
+    result = []
 
-    } for link in links]
+    for link in links:
+        last_history = await PriceHistory.filter(product_link_id=link.id).order_by("-date").first()
+        result.append({
+            "Ссылка на товар": link.url,
+            "Кол-во просмотров": last_history.views,
+            "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A"
+        }
+        )
+    return result
 
 
 @router.callback_query(F.data.startswith("add_table_"))
@@ -318,7 +325,7 @@ async def view_final_table(callback: CallbackQuery):
         if site.title == 'SATU KZ':
             links_data = _prepare_links_data(links, is_final=True)
         else:
-            links_data = _prepare_olx_links_data(links)
+            links_data = await _prepare_olx_links_data(links)
 
         excel_file = TableHandler.create_excel_with_autofit(links_data, group)
         group_info_text = await _get_group_info_text(group_id)
