@@ -10,6 +10,7 @@ from bot.database.models.price_history import PriceHistory
 from bot.database.models.product_link import ProductLink
 from bot.keyboards.group import group_detail_keyboard
 from bot.services.group import GroupService
+from bot.tasks.parse import generate_excel
 
 logger = logging.getLogger(__name__)
 
@@ -139,28 +140,7 @@ async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
     if not data_rows:
         return None
 
-    # Создаем DataFrame
-    df = pd.DataFrame(data_rows)
-
-    # Сохраняем
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Прирост просмотров")
-        worksheet = writer.sheets["Прирост просмотров"]
-
-        # Автоширина колонок
-        for i, col in enumerate(worksheet.columns):
-            max_length = 0
-            column = col[0].column_letter
-            for cell in col:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            worksheet.column_dimensions[column].width = (max_length + 2) * 1.1
-
-    output.seek(0)
+    output = await generate_excel(data_rows)
     return output
 
 

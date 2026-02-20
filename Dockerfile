@@ -4,17 +4,14 @@ WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
 
-RUN apt-get update
-
+# Обновляем pip и устанавливаем Python-зависимости (включая selenium)
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
+# Устанавливаем Chromium и ChromeDriver
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
+    chromium \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
-
-RUN playwright install chromium
-RUN playwright install-deps chromium
 
 COPY . /app

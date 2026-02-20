@@ -4,7 +4,12 @@ import logging
 import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Union
-from playwright.async_api import async_playwright
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 import aiohttp
 import pandas as pd
 from aiogram import Bot
@@ -159,7 +164,7 @@ async def generate_excel(data: List[Dict]) -> io.BytesIO:
             elif contains_product_name:
                 adjusted_width = 50
             elif contains_url_to_product_name:
-                adjusted_width = 100
+                adjusted_width = 50
             elif contains_date_name:
                 adjusted_width = 15
             elif contains_price_name:
@@ -255,9 +260,64 @@ async def process_group(group: ProductGroup, parser: ProductParser, with_stop_bu
         logger.info(f"Отчёт по группе '{group.title}' отправлен пользователю {group.user.telegram_id}")
 
 
-async def process_olx_group(group: ProductGroup):
-    """Специальный парсер для OLX через Playwright (для просмотров)."""
-    logger.info(f"Запуск OLX парсера для группы '{group.title}' (id={group.id})")
+def fetch_olx_data_sync(driver, url):
+    """Синхронная функция для получения данных страницы через Selenium."""
+    views_count = 0
+    full_product_title = ""
+    success = False
+
+    for attempt in range(1, 4):
+        try:
+            driver.get(url)
+
+            time.sleep(8)
+
+            content = driver.page_source
+
+            if "Request blocked" in content or "403 Forbidden" in content:
+                time.sleep(30)
+                continue
+
+            # Скроллинг
+            for _ in range(10):
+                driver.execute_script("window.scrollBy(0, 200);")
+                time.sleep(0.1)
+
+            try:
+                wait = WebDriverWait(driver, 5)
+                counter_element = wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//span[@data-testid='page-view-counter']"))
+                )
+                match = re.search(r'\d+', counter_element.text)
+
+                title_element = driver.find_element(By.XPATH, "//div[@data-testid='offer_title']/h4")
+                price_element = driver.find_element(By.XPATH, "//div[@data-testid='ad-price-container']/h3")
+
+                full_product_title = title_element.text
+                if price_element.text:
+                    full_product_title = f"{full_product_title} {price_element.text.strip()}"
+
+                if match:
+                    views_count = int(match.group())
+                    success = True
+                    break
+
+            except TimeoutException:
+                success = True
+                break
+            except Exception:
+                success = True
+                break
+
+        except Exception:
+            time.sleep(5)
+
+    return views_count, full_product_title, success
+
+
+async def process_olx_group(group):
+    """Асинхронный координатор парсинга."""
+    logger.info(f"Запуск OLX парсера (Selenium Thread) для '{group.title}' (id={group.id})")
 
     data = []
     total_links = len(group.product_links)
@@ -265,76 +325,29 @@ async def process_olx_group(group: ProductGroup):
     last_text = None
     start_time = time.time()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        )
+    chrome_options = Options()
+    chrome_options.binary_location = "/usr/bin/chromium"
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36")
 
-        # Оставляем CSS (отключаем только картинки/видео/шрифты)
-        await context.route("**/*", lambda route: route.abort()
-        if route.request.resource_type in ["image", "media", "font"]
-        else route.continue_()
-                            )
+    prefs = {
+        "profile.managed_default_content_settings.images": 2,
+        "profile.managed_default_content_settings.fonts": 2,
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
 
-        page = await context.new_page()
+    driver = await asyncio.to_thread(webdriver.Chrome, options=chrome_options)
+    driver.set_page_load_timeout(40)
 
+    try:
         for idx, link in enumerate(group.product_links, start=1):
-            views_count = 0
-            full_product_title = ''
-            success = False
 
-            # --- ЦИКЛ ПОВТОРОВ ДЛЯ ОДНОЙ ССЫЛКИ ---
-            for attempt in range(1, 4):
-                try:
-                    response = await page.goto(link.url, wait_until='domcontentloaded', timeout=40000)
-                    content = await page.content()
-                    await asyncio.sleep(8)
-
-                    # 1. ПРОВЕРКА НА БЛОКИРОВКУ
-                    if response.status == 403 or "Request blocked" in content:
-                        logger.warning(f"⚠️ [Попытка {attempt}] Блок CloudFront для {link.url}. Ждем 30с...")
-                        await asyncio.sleep(30)
-                        continue  # Идем на следующую попытку
-
-                    await page.evaluate("""
-                                            async () => {
-                                                for (let i = 0; i < 10; i++) {
-                                                    window.scrollBy(0, 200);
-                                                    await new Promise(r => setTimeout(r, 100)); 
-                                                }
-                                            }
-                                        """)
-
-                    selector = "//span[@data-testid='page-view-counter']"
-
-                    try:
-                        await page.wait_for_selector(selector, timeout=5000)
-                        text_content = await page.locator(selector).inner_text()
-                        match = re.search(r'\d+', text_content)
-                        title_selector = await page.query_selector("//div[@data-testid='offer_title']/h4")
-
-                        price_selector = await page.query_selector("//div[@data-testid='ad-price-container']/h3")
-                        price_product = await price_selector.text_content()
-                        title_product = await title_selector.text_content()
-
-                        full_product_title = title_product
-                        if price_product:
-                            price_product = price_product.strip()
-                            full_product_title = f'{full_product_title} {price_product}'
-
-                        if match:
-                            views_count = int(match.group())
-                            success = True
-                            break  # Нашли данные, выходим из цикла попыток
-                    except Exception:
-                        logger.warning(f"Счетчик не найден на странице: {link.url}")
-                        success = True  # Страница загрузилась, но счетчика нет (бывает)
-                        break
-
-                except Exception as e:
-                    logger.error(f"Ошибка на попытке {attempt} для {link.url}: {e}")
-                    await asyncio.sleep(5)
+            views_count, full_product_title, success = await asyncio.to_thread(
+                fetch_olx_data_sync, driver, link.url
+            )
 
             if success:
                 group.last_check = datetime.now(timezone.utc)
@@ -361,10 +374,10 @@ async def process_olx_group(group: ProductGroup):
                         "Дата проверки": link.last_check.strftime("%d.%m.%Y"),
                     })
                 except Exception as e:
-                    logger.error(f"Ошибка записи в БД для {link.url}: {e}")
+                    logger.error(f"Ошибка записи в БД: {e}")
 
             progress_bar = format_progress(start_time, idx, total_links)
-            new_text = f"🕵️‍♂️ Парсинг OLX (Просмотры): {group.title}\n{progress_bar}"
+            new_text = f"🕵️‍♂️ Парсинг OLX (В фоне): {group.title}\n{progress_bar}"
 
             if group.user.telegram_id:
                 try:
@@ -381,17 +394,15 @@ async def process_olx_group(group: ProductGroup):
                 except Exception as e:
                     logger.warning(f"Не удалось обновить прогресс: {e}")
 
-        await browser.close()
+    finally:
+        await asyncio.to_thread(driver.quit)
 
     if data and group.user.telegram_id:
         excel_file = await generate_excel(data)
-
         await bot.send_document(
             chat_id=group.user.telegram_id,
             document=BufferedInputFile(excel_file.getvalue(), filename=f"OLX_Views_{group.title}.xlsx"),
-            caption=(
-                f"✅ Сбор просмотров завершён.\nВсего ссылок: {total_links}\nУспешно: {parsed_links}\n"
-            )
+            caption=f"✅ Сбор просмотров завершён.\nВсего ссылок: {total_links}\nУспешно: {parsed_links}\n"
         )
 
 
