@@ -286,7 +286,7 @@ async def process_olx_group(group: ProductGroup):
             # --- ЦИКЛ ПОВТОРОВ ДЛЯ ОДНОЙ ССЫЛКИ ---
             for attempt in range(1, 4):
                 try:
-                    response = await page.goto(link.url, wait_until="domcontentloaded", timeout=25000)
+                    response = await page.goto(link.url, timeout=40000)
                     content = await page.content()
                     await asyncio.sleep(8)
 
@@ -296,8 +296,15 @@ async def process_olx_group(group: ProductGroup):
                         await asyncio.sleep(30)
                         continue  # Идем на следующую попытку
 
-                    # 2. СКРОЛЛ И ПОИСК ДАННЫХ
-                    await page.evaluate("window.scrollTo(0, 800)")
+                    await page.evaluate("""
+                                            async () => {
+                                                for (let i = 0; i < 10; i++) {
+                                                    window.scrollBy(0, 200);
+                                                    await new Promise(r => setTimeout(r, 100)); 
+                                                }
+                                            }
+                                        """)
+
                     selector = "//span[@data-testid='page-view-counter']"
 
                     try:
