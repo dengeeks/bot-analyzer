@@ -281,6 +281,7 @@ async def process_olx_group(group: ProductGroup):
 
         for idx, link in enumerate(group.product_links, start=1):
             views_count = 0
+            full_product_title = ''
             success = False
 
             # --- ЦИКЛ ПОВТОРОВ ДЛЯ ОДНОЙ ССЫЛКИ ---
@@ -416,7 +417,6 @@ async def parse_olx_groups():
     """Запуск фонового парсера по всем активным группам."""
     logger.info("Запуск фонового парсера...")
     async with aiohttp.ClientSession() as session:
-        parser = ProductParser(session)
         seven_days_ago = datetime.utcnow() - timedelta(days=7)
 
         groups_olx = await ProductGroup.filter(
@@ -430,7 +430,7 @@ async def parse_olx_groups():
             return
 
         for group in groups_olx:
-            await process_group(group, parser)
+            await process_olx_group(group)
 
     logger.info("Фоновый парсинг завершён ✅")
 
