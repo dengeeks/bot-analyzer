@@ -132,7 +132,8 @@ async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
             "Всего просмотров": current_views,
             "Прирост": sign,
             "Было (дата)": f"{prev_views} ({prev_date_str})",
-            "Ссылка": link.url
+            "Ссылка": link.url,
+            "Название продукта":link.productName
         })
 
     if not data_rows:

@@ -82,6 +82,7 @@ async def _prepare_olx_links_data(links) -> list:
         current_views = last_history.views if last_history is not None else 0
         result.append({
             "Ссылка на товар": link.url,
+            "Название продукта": link.productName,
             "Кол-во просмотров": current_views,
             "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A"
         }

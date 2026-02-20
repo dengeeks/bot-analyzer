@@ -311,6 +311,9 @@ async def process_olx_group(group: ProductGroup):
                         await page.wait_for_selector(selector, timeout=5000)
                         text_content = await page.locator(selector).inner_text()
                         match = re.search(r'\d+', text_content)
+                        title_selector = await page.query_selector("//div[@data-testid='offer_title']/h4")
+
+                        title_product = await title_selector.text_content()
                         if match:
                             views_count = int(match.group())
                             success = True
@@ -332,6 +335,7 @@ async def process_olx_group(group: ProductGroup):
                     async with in_transaction() as conn:
                         link.views = float(views_count)
                         link.last_check = datetime.now(timezone.utc)
+                        link.productName = title_product
                         await link.save(using_db=conn)
 
                         await PriceHistory.create(
@@ -343,6 +347,7 @@ async def process_olx_group(group: ProductGroup):
                     parsed_links += 1
                     data.append({
                         "Дата проверки": link.last_check.strftime("%d.%m.%Y"),
+                        "Название продукта": title_product,
                         "Просмотры": views_count,
                         "Ссылка": link.url,
                     })
