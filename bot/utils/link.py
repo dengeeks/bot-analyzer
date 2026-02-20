@@ -22,7 +22,6 @@ async def _process_links(urls: pd.Series, group_id: int, site_title: str) -> int
         if not url:
             continue
 
-
         if site_title == "SATU KZ":
             # Валидация: проверяем, что ссылка начинается с https://satu.kz
             if not url.startswith('https://satu.kz'):
@@ -128,12 +127,13 @@ async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
 
         # Формируем строку для отчета
         data_rows.append({
-            "Дата проверки": current_rec.date.strftime("%d.%m.%Y %H:%M"),
+            "Название продукта": link.productName,
+            "Ссылка": link.url,
             "Всего просмотров": current_views,
             "Прирост": sign,
             "Было (дата)": f"{prev_views} ({prev_date_str})",
-            "Ссылка": link.url,
-            "Название продукта":link.productName
+            "Дата проверки": current_rec.date.strftime("%d.%m.%Y %H:%M")
+
         })
 
     if not data_rows:
@@ -162,6 +162,7 @@ async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
 
     output.seek(0)
     return output
+
 
 async def generate_price_diff_excel(group_id: int) -> io.BytesIO:
     """

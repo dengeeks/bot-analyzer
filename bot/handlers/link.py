@@ -59,16 +59,16 @@ def _prepare_links_data(links, is_final: bool = False) -> list:
     """Подготавливает данные ссылок для Excel"""
     if is_final:
         return [{
-            "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A",
             "Название товара": link.productName or "N/A",
             "Название компании": link.companyName or "N/A",
             "Стоимость": link.last_price or "N/A",
-            "Ссылка": link.url
+            "Ссылка": link.url,
+            "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A"
         } for link in links]
     else:
         return [{
-            "Название компании": link.companyName,
             "Название продукта": link.productName,
+            "Название компании": link.companyName,
             "Ссылка на товар": link.url
         } for link in links]
 
@@ -81,8 +81,8 @@ async def _prepare_olx_links_data(links) -> list:
         last_history = await PriceHistory.filter(product_link_id=link.id).order_by("-date").first()
         current_views = last_history.views if last_history is not None else 0
         result.append({
-            "Ссылка на товар": link.url,
             "Название продукта": link.productName,
+            "Ссылка на товар": link.url,
             "Кол-во просмотров": current_views,
             "Дата последней проверки": link.last_check.strftime("%d.%m.%Y") if link.last_check else "N/A"
         }

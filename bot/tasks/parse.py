@@ -286,7 +286,7 @@ async def process_olx_group(group: ProductGroup):
             # --- ЦИКЛ ПОВТОРОВ ДЛЯ ОДНОЙ ССЫЛКИ ---
             for attempt in range(1, 4):
                 try:
-                    response = await page.goto(link.url, timeout=40000)
+                    response = await page.goto(link.url, wait_until='domcontentloaded', timeout=40000)
                     content = await page.content()
                     await asyncio.sleep(8)
 
@@ -313,7 +313,15 @@ async def process_olx_group(group: ProductGroup):
                         match = re.search(r'\d+', text_content)
                         title_selector = await page.query_selector("//div[@data-testid='offer_title']/h4")
 
+                        price_selector = await page.query_selector("//div[@data-testid='ad-price-container']/h3")
+                        price_product = await price_selector.text_content()
                         title_product = await title_selector.text_content()
+
+                        full_product_title = title_product
+                        if price_product:
+                            price_product = price_product.strip()
+                            full_product_title = f'{full_product_title} {price_product}'
+
                         if match:
                             views_count = int(match.group())
                             success = True
@@ -335,7 +343,7 @@ async def process_olx_group(group: ProductGroup):
                     async with in_transaction() as conn:
                         link.views = float(views_count)
                         link.last_check = datetime.now(timezone.utc)
-                        link.productName = title_product
+                        link.productName = full_product_title
                         await link.save(using_db=conn)
 
                         await PriceHistory.create(
@@ -346,10 +354,10 @@ async def process_olx_group(group: ProductGroup):
                         )
                     parsed_links += 1
                     data.append({
-                        "Дата проверки": link.last_check.strftime("%d.%m.%Y"),
-                        "Название продукта": title_product,
-                        "Просмотры": views_count,
+                        "Название продукта": full_product_title,
                         "Ссылка": link.url,
+                        "Просмотры": views_count,
+                        "Дата проверки": link.last_check.strftime("%d.%m.%Y"),
                     })
                 except Exception as e:
                     logger.error(f"Ошибка записи в БД для {link.url}: {e}")
