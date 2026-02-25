@@ -19,7 +19,7 @@ from bot.services.link import LinkService, TableHandler
 from bot.tasks.parse import parse_single_group
 from bot.utils.callback import parse_callback
 from bot.utils.group import _get_group_info_text, _get_add_table_info_text
-from bot.utils.link import _process_links, generate_price_diff_excel, generate_last_views_diff_excel
+from bot.utils.link import _process_links, generate_price_diff_excel, generate_total_views_diff_excel
 from core.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -359,7 +359,7 @@ async def price_analysis(callback: CallbackQuery):
                 await callback.answer("❌ Нет данных для анализа цен")
                 return
         else:
-            excel_file = await generate_last_views_diff_excel(group_id)
+            excel_file = await generate_total_views_diff_excel(group_id)
 
             if not excel_file:
                 await callback.answer("❌ Нет данных для анализа просмотров")
