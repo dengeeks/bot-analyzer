@@ -87,10 +87,10 @@ def _generate_group_info_text(group: Any, links_count: Optional[int] = None) -> 
     return base_text
 
 
-async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
+async def generate_total_views_diff_excel(group_id: int) -> io.BytesIO:
     """
-    Сравнивает только ПОСЛЕДНИЙ и ПРЕДПОСЛЕДНИЙ парсинг.
-    Показывает прирост просмотров за этот период.
+    Сравнивает САМЫЙ ПЕРВЫЙ и САМЫЙ ПОСЛЕДНИЙ парсинг.
+    Показывает общий прирост просмотров за всё время существования товара в базе.
     """
     links = await ProductLink.filter(group_id=group_id).all()
     if not links:
@@ -99,42 +99,36 @@ async def generate_last_views_diff_excel(group_id: int) -> io.BytesIO:
     data_rows = []
 
     for link in links:
-        last_records = await PriceHistory.filter(product_link=link).order_by('-date').limit(2)
+        current_rec = await PriceHistory.filter(product_link=link).order_by('-date').first()
 
-        if not last_records:
+        if not current_rec:
             continue
 
-        current_rec = last_records[0]
+        first_rec = await PriceHistory.filter(product_link=link).order_by('date').first()
+
         current_views = current_rec.views if current_rec.views is not None else 0
 
-        if len(last_records) == 2:
-            prev_rec = last_records[1]
-            prev_views = prev_rec.views if prev_rec.views is not None else 0
 
-            diff = current_views - prev_views
+        first_views = first_rec.views if first_rec.views is not None else 0
 
-            if diff > 0:
-                sign = f"➕{diff}"
-            elif diff < 0:
-                sign = f"➖{abs(diff)}"
-            else:
-                sign = "0"
+        diff = current_views - first_views
 
-            prev_date_str = prev_rec.date.strftime("%d.%m %H:%M")
+        if diff > 0:
+            sign = f"➕{diff}"
+        elif diff < 0:
+            sign = f"➖{abs(diff)}"
         else:
-            prev_views = 0
-            sign = "🆕 Новый"
-            prev_date_str = "-"
+            sign = "0"
 
-        # Формируем строку для отчета
+        prev_date_str = first_rec.date.strftime("%d.%m.%Y %H:%M")
+
         data_rows.append({
             "Название продукта": link.productName,
             "Ссылка": link.url,
-            "Всего просмотров": current_views,
-            "Прирост": sign,
-            "Было (дата)": f"{prev_views} ({prev_date_str})",
-            "Дата проверки": current_rec.date.strftime("%d.%m.%Y %H:%M")
-
+            "Текущие просмотры": current_views,
+            "Общий прирост": sign,
+            "Было на старте": f"{first_views} ({prev_date_str})",
+            "Дата последнего": current_rec.date.strftime("%d.%m.%Y %H:%M")
         })
 
     if not data_rows:
